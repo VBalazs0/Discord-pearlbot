@@ -1,14 +1,11 @@
 /*
-  Single-file Discord bot implementing a /link command that:
-  - sends a request embed with ✅/❌ buttons to the AdminLogs channel (configured in config.json)
-  - persists pending requests across restarts (pending.json)
-  - persists approved account links (accounts.json)
-  - disables buttons after a decision
-  - logs all actions to console and log/actions.log
-  Notes:
-  - npm install discord.js dotenv
-  - Put token in .env: DISCORD_TOKEN=your_token_here
-  - Provide config.json with at least: { "channelIDs": { "AdminLogs": "CHANNEL_ID" }, "GUILD_ID": "optional_guild_id" }
+  Fixed main.js:
+  - balanced try/catch blocks
+  - separated interaction handling for chat commands and buttons
+  - enforced admin-only approvals
+  - strict ownership for /tp
+  - logging to console and log/actions.log
+  - restores pending requests on restart
 */
 
 require('dotenv').config();
@@ -33,7 +30,11 @@ const LOG_DIR = path.join(DATA_DIR, 'log');
 const LOG_FILE = path.join(LOG_DIR, 'actions.log');
 
 // ensure log dir exists
-try { if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true }); } catch (e) { console.error('Could not create log dir', e); }
+try {
+  if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
+} catch (e) {
+  console.error('Could not create log dir', e);
+}
 
 function timestamp() {
   return new Date().toISOString();
@@ -49,7 +50,9 @@ function errorLog(msg) { console.error(msg); appendLogLine('ERROR', msg); }
 function readJson(filePath, defaultValue) {
   try {
     if (!fs.existsSync(filePath)) return defaultValue;
-    return JSON.parse(fs.readFileSync(filePath, 'utf8') || 'null') || defaultValue;
+    const raw = fs.readFileSync(filePath, 'utf8');
+    if (!raw) return defaultValue;
+    return JSON.parse(raw);
   } catch (e) {
     errorLog(`Failed to read ${filePath}: ${e}`);
     return defaultValue;
@@ -75,7 +78,7 @@ const ADMIN_CHANNEL_ID =
   config.AdminLogs ||
   (config.channelIDs && config.channelIDs.AdminLogs);
 
-// make admin role ids easy to access
+// admin role ids
 const ADMIN_ROLE_IDS = Array.isArray(config.AdminRoleIDs) ? config.AdminRoleIDs : (Array.isArray(config.AdminRoleIds) ? config.AdminRoleIds : []);
 
 if (!TOKEN) {
@@ -94,6 +97,15 @@ const linkCommand = {
   options: [
     { name: 'ign', description: 'Minecraft in-game name', type: ApplicationCommandOptionType.String, required: true },
     { name: 'account', description: 'Discord account to link (if different)', type: ApplicationCommandOptionType.User, required: false }
+  ]
+};
+
+const tpCommand = {
+  name: 'tp',
+  description: 'Send a .tp instapearl [IGN] message to the PearlbotChannel (you only, unless you are admin)',
+  options: [
+    { name: 'ign', description: 'Minecraft in-game name', type: ApplicationCommandOptionType.String, required: true },
+    { name: 'account', description: 'Target Discord account (admins only)', type: ApplicationCommandOptionType.User, required: false }
   ]
 };
 
@@ -127,14 +139,14 @@ client.once(Events.ClientReady, async () => {
   try {
     if (GUILD_ID) {
       const guild = await client.guilds.fetch(GUILD_ID);
-      await guild.commands.create(linkCommand);
-      info(`Registered /link to guild ${GUILD_ID}`);
+      await guild.commands.set([linkCommand, tpCommand]);
+      info(`Registered /link and /tp to guild ${GUILD_ID}`);
     } else {
-      await client.application.commands.create(linkCommand);
-      info('Registered /link globally (may take up to an hour)');
+      await client.application.commands.set([linkCommand, tpCommand]);
+      info('Registered /link and /tp globally (may take up to an hour)');
     }
   } catch (err) {
-    errorLog(`Failed to register command: ${err}`);
+    errorLog(`Failed to register command(s): ${err}`);
   }
 
   if (ADMIN_CHANNEL_ID) {
@@ -171,51 +183,133 @@ client.once(Events.ClientReady, async () => {
 
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    if (interaction.isChatInputCommand()) {
-      if (interaction.commandName !== 'link') return;
-      const ign = interaction.options.getString('ign', true).trim();
-      const targetUser = interaction.options.getUser('account') || interaction.user;
-      const reqId = `${Date.now()}-${Math.floor(Math.random()*10000)}`;
-      const req = {
-        id: reqId,
-        requesterId: interaction.user.id,
-        requesterTag: `${interaction.user.username}#${interaction.user.discriminator}`,
-        targetId: targetUser.id,
-        targetTag: `${targetUser.username}#${targetUser.discriminator}`,
-        ign,
-        status: 'pending',
-        createdAt: Date.now(),
-        messageId: null
-      };
-      pending.push(req);
-      writeJson(PENDING_FILE, pending);
-      info(`Created link request ${req.id} requester=${req.requesterId} target=${req.targetId} ign=${req.ign}`);
+    // CHAT COMMANDS
+    // Replace the /tp handling with this strict, clear version
+    if (interaction.isChatInputCommand() && interaction.commandName === 'tp') {
+      const ignRaw = interaction.options.getString('ign', true).trim();
+      const ign = ignRaw.toLowerCase();
 
-      if (!ADMIN_CHANNEL_ID) {
-        await interaction.reply({ content: 'AdminLogs not configured on the bot. Contact the bot owner.', ephemeral: true });
-        return;
-      }
-      const adminChannel = await client.channels.fetch(ADMIN_CHANNEL_ID).catch(() => null);
-      if (!adminChannel || !adminChannel.isTextBased()) {
-        await interaction.reply({ content: 'AdminLogs channel not found or not a text channel. Contact the bot owner.', ephemeral: true });
-        warn(`AdminLogs channel not found or not a text channel: ${ADMIN_CHANNEL_ID}`);
-        return;
+      // If an account param is provided, it's only allowed for admins.
+      const requestedTarget = interaction.options.getUser('account') || interaction.user;
+
+      // reload latest accounts to avoid stale memory
+      accounts = readJson(ACCOUNTS_FILE, {});
+
+      // fetch member for up-to-date roles/permissions
+      let member = interaction.member;
+      if (!member && interaction.guildId) {
+        try { member = await interaction.guild.members.fetch(interaction.user.id); } catch (e) { warn(`Could not fetch member for permission check: ${e}`); }
       }
 
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`link_accept_${reqId}`).setStyle(ButtonStyle.Success).setEmoji('✅').setLabel('Approve'),
-        new ButtonBuilder().setCustomId(`link_reject_${reqId}`).setStyle(ButtonStyle.Danger).setEmoji('❌').setLabel('Reject')
-      );
+      // admin check (configured roles or server perms)
+      let isAdmin = false;
+      if (Array.isArray(ADMIN_ROLE_IDS) && ADMIN_ROLE_IDS.length > 0 && member && member.roles && member.roles.cache) {
+        isAdmin = member.roles.cache.some(r => ADMIN_ROLE_IDS.includes(r.id));
+      }
+      if (!isAdmin && member && member.permissions) {
+        isAdmin = member.permissions.has(PermissionsBitField.Flags.Administrator) || member.permissions.has(PermissionsBitField.Flags.ManageGuild);
+      }
 
-      const embed = createEmbedForReq(req, 'pending');
-      const sent = await adminChannel.send({ embeds: [embed], components: [row] });
-      req.messageId = sent.id;
-      writeJson(PENDING_FILE, pending);
-      info(`Sent admin message for request ${req.id} messageId=${req.messageId}`);
+      // Disallow targeting other users for non-admins
+      if (!isAdmin && requestedTarget.id !== interaction.user.id) {
+        await interaction.reply({ content: 'You may only TP your own linked accounts. Ask an admin to TP for others.', ephemeral: true });
+        warn(`Blocked /tp: ${interaction.user.id} attempted to TP for ${requestedTarget.id}`);
+        return;
+      }
 
-      await interaction.reply({ content: 'Link request submitted to admins.', ephemeral: true });
+      // For everyone (including admins who target themselves) require the IGN to be linked to the TARGET account.
+      const targetEntry = accounts[requestedTarget.id];
+      const ownsIgn = targetEntry && Array.isArray(targetEntry.igns) && targetEntry.igns.some(i => i.toLowerCase() === ign);
+
+      if (!ownsIgn) {
+        // admins targeting another user could still be blocked here if not linked; admins should link or approve first.
+        await interaction.reply({
+          content: requestedTarget.id === interaction.user.id
+            ? 'That IGN is not linked to your Discord account. Use /link to request linking or ask an admin to link it.'
+            : 'That IGN is not linked to the target Discord account. Link it first or ask an admin to link it.',
+          ephemeral: true
+        });
+        warn(`Blocked /tp: requester=${interaction.user.id} target=${requestedTarget.id} ign=${ignRaw} (not linked)`);
+        return;
+      }
+
+      // All checks passed -> post to PearlbotChannel
+      const PEARL_CHANNEL_ID = (config.channelIDs && config.channelIDs.PearlbotChannel) || config.PearlbotChannel || process.env.PEARL_CHANNEL_ID;
+      if (!PEARL_CHANNEL_ID) {
+        await interaction.reply({ content: 'PearlbotChannel not configured. Contact the bot owner.', ephemeral: true });
+        warn('PearlbotChannel not configured');
+        return;
+      }
+
+      const pearlChannel = await client.channels.fetch(PEARL_CHANNEL_ID).catch(() => null);
+      if (!pearlChannel || !pearlChannel.isTextBased()) {
+        await interaction.reply({ content: 'PearlbotChannel not found or not a text channel. Contact the bot owner.', ephemeral: true });
+        warn(`PearlbotChannel invalid: ${PEARL_CHANNEL_ID}`);
+        return;
+      }
+
+      const msg = `.tp instapearl ${ignRaw}`;
+      await pearlChannel.send(msg);
+      info(`TP posted to ${PEARL_CHANNEL_ID} by ${interaction.user.id} for ${requestedTarget.id} ign=${ignRaw}`);
+
+      await interaction.reply({ content: `Posted to Pearlbot channel: ${msg}`, ephemeral: true });
+      return;
     }
 
+    // /link
+    if (interaction.commandName !== 'link') return;
+    const ign = interaction.options.getString('ign', true).trim();
+    const targetUser = interaction.options.getUser('account') || interaction.user;
+    const reqId = `${Date.now()}-${Math.floor(Math.random()*10000)}`;
+    const req = {
+      id: reqId,
+      requesterId: interaction.user.id,
+      requesterTag: `${interaction.user.username}#${interaction.user.discriminator}`,
+      targetId: targetUser.id,
+      targetTag: `${targetUser.username}#${targetUser.discriminator}`,
+      ign,
+      status: 'pending',
+      createdAt: Date.now(),
+      messageId: null
+    };
+    pending.push(req);
+    writeJson(PENDING_FILE, pending);
+    info(`Created link request ${req.id} requester=${req.requesterId} target=${req.targetId} ign=${req.ign}`);
+
+    if (!ADMIN_CHANNEL_ID) {
+      await interaction.reply({ content: 'AdminLogs not configured on the bot. Contact the bot owner.', ephemeral: true });
+      return;
+    }
+    const adminChannel = await client.channels.fetch(ADMIN_CHANNEL_ID).catch(() => null);
+    if (!adminChannel || !adminChannel.isTextBased()) {
+      await interaction.reply({ content: 'AdminLogs channel not found or not a text channel. Contact the bot owner.', ephemeral: true });
+      warn(`AdminLogs channel not found or not a text channel: ${ADMIN_CHANNEL_ID}`);
+      return;
+    }
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`link_accept_${reqId}`).setStyle(ButtonStyle.Success).setEmoji('✅').setLabel('Approve'),
+      new ButtonBuilder().setCustomId(`link_reject_${reqId}`).setStyle(ButtonStyle.Danger).setEmoji('❌').setLabel('Reject')
+    );
+
+    const embed = createEmbedForReq(req, 'pending');
+    const sent = await adminChannel.send({ embeds: [embed], components: [row] });
+    req.messageId = sent.id;
+    writeJson(PENDING_FILE, pending);
+    info(`Sent admin message for request ${req.id} messageId=${req.messageId}`);
+
+    await interaction.reply({ content: 'Link request submitted to admins.', ephemeral: true });
+  } catch (err) {
+    errorLog(`Interaction handler error: ${err}`);
+    try {
+      if (interaction && !interaction.replied) await interaction.reply({ content: 'An error occurred handling that interaction.', ephemeral: true });
+    } catch (e) { errorLog(`Failed to send error reply: ${e}`); }
+  }
+});
+
+client.on(Events.InteractionCreate, async (interaction) => {
+  try {
+    // BUTTON INTERACTIONS
     if (interaction.isButton()) {
       const cid = interaction.customId;
       if (!cid.startsWith('link_accept_') && !cid.startsWith('link_reject_')) return;
