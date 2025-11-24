@@ -1,10 +1,9 @@
 {
-    "AdminRoleIDs": [
-        "1442552651966316724",
-        "768547165164273705"
-    ],
-    "channelIDs": {
-        "PearlbotChannel": "1442549899701784617",
-        "AdminLogs": "1442549789777461475"
-    }
+  "AdminRoleIDs": [
+    "1442552651966316724"
+  ],
+  "channelIDs": {
+    "PearlbotChannel": "1442549899701784617",
+    "AdminLogs": "1442549789777461475"
+  }
 }

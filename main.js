@@ -149,6 +149,20 @@ client.once(Events.ClientReady, async () => {
     errorLog(`Failed to register command(s): ${err}`);
   }
 
+  // --- added: set application description ---
+  try {
+    if (client.application && typeof client.application.edit === 'function') {
+      await client.application.fetch();
+      await client.application.edit({ description: 'Made By Bacsi10' });
+      info('Application description set to "Made By Bacsi10"');
+    } else {
+      warn('client.application.edit not available on this discord.js version');
+    }
+  } catch (e) {
+    warn(`Failed to set application description: ${e}`);
+  }
+  // --- end added code ---
+
   if (ADMIN_CHANNEL_ID) {
     try {
       const adminChannel = await client.channels.fetch(ADMIN_CHANNEL_ID);
