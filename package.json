@@ -1,0 +1,23 @@
+{
+  "name": "discord-pearlbot",
+  "version": "1.0.0",
+  "description": "A discord bot that you can message to pull your pearl in game",
+  "main": "main.js",
+  "scripts": {
+    "test": "node main.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/VBalazs0/Discord-Pearlbot-Addon.git"
+  },
+  "keywords": [
+    "Pearlbot",
+    "Discord"
+  ],
+  "author": "Bacsi10",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/VBalazs0/Discord-Pearlbot-Addon/issues"
+  },
+  "homepage": "https://github.com/VBalazs0/Discord-Pearlbot-Addon#readme"
+}
